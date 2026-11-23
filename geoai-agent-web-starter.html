@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GeoAI Agent — NYC Q&A</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body { margin: 0; height: 100%; font-family: sans-serif; }
+  /* The map IS the platform: full-screen background */
+  #map { position: fixed; inset: 0; z-index: 0; }
+  /* The chat floats on top of the map */
+  .chat-panel {
+    position: fixed; left: 16px; top: 16px; bottom: 16px; width: 380px;
+    background: white; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    z-index: 1000; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .chat-header { padding: 12px 16px; font-weight: bold; border-bottom: 1px solid #eee; }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  .msg { margin: 8px 0; line-height: 1.5; }
+  .msg.user { text-align: right; color: #2563eb; }
+  .chat-input { display: flex; border-top: 1px solid #eee; padding: 8px; }
+  .chat-input input { flex: 1; border: 1px solid #ddd; border-radius: 8px; padding: 8px; }
+  .chat-input button { margin-left: 8px; border: none; background: #2563eb; color: white; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  /* On phones the panel becomes a bottom sheet over the map */
+  @media (max-width: 640px) {
+    .chat-panel { left: 0; right: 0; top: auto; bottom: 0; width: auto; height: 55vh; border-radius: 16px 16px 0 0; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="chat-panel">
+  <div class="chat-header">GeoAI Agent — NYC Q&A</div>
+  <div class="chat-messages" id="messages"></div>
+  <div class="chat-input">
+    <input id="input" placeholder="e.g. How long does it take to drive from JFK Airport to Times Square?">
+    <button id="send">Send</button>
+  </div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// Map: full-screen background, Esri World Street Map (free, no key)
+const map = L.map("map").setView([40.73, -73.94], 11);
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
+  attribution: "Esri",
+}).addTo(map);
+
+let routeLine = null;
+const markers = [];
+
+function addMessage(text, who) {
+  const div = document.createElement("div");
+  div.className = "msg " + who;
+  div.textContent = text;
+  document.getElementById("messages").appendChild(div);
+}
+
+async function geocode(place) {
+  const url = "https://nominatim.openstreetmap.org/search?format=json&q=" + encodeURIComponent(place + ", New York City");
+  const res = await fetch(url, { headers: { "Accept": "application/json" } });
+  const data = await res.json();
+  if (!data.length) return null;
+  return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), name: data[0].display_name };
+}
+
+async function getRoute(a, b) {
+  const url = `https://router.project-osrm.org/route/v1/driving/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+  const res = await fetch(url);
+  const data = await res.json();
+  const leg = data.routes[0];
+  return { coords: leg.geometry.coordinates.map(([lon, lat]) => [lat, lon]), km: leg.distance / 1000, min: leg.duration / 60 };
+}
+
+function clearMap() {
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  markers.forEach(m => map.removeLayer(m));
+  markers.length = 0;
+}
+
+// Rule-based starter: "from A to B" -> route; otherwise geocode one place.
+// Later this is where the Gemini function-calling loop goes (same as the Colab agent).
+async function ask(question) {
+  addMessage(question, "user");
+  const clean = (s) => s.trim().replace(/[?.!]+$/, "");
+  const m = question.match(/from\s+(.+?)\s+to\s+(.+)/i);
+  try {
+    if (m) {
+      const a = await geocode(clean(m[1]));
+      const b = await geocode(clean(m[2]));
+      if (!a || !b) { addMessage("Sorry, I could not find one of those places.", "agent"); return; }
+      const r = await getRoute(a, b);
+      clearMap();
+      markers.push(L.marker([a.lat, a.lon]).addTo(map).bindPopup("Origin: " + clean(m[1])));
+      markers.push(L.marker([b.lat, b.lon]).addTo(map).bindPopup("Destination: " + clean(m[2])));
+      routeLine = L.polyline(r.coords, { color: "blue", weight: 4 }).addTo(map);
+      map.fitBounds(routeLine.getBounds().pad(0.2));
+      addMessage(`It takes about ${r.min.toFixed(0)} minutes to drive (${r.km.toFixed(1)} km).`, "agent");
+    } else {
+      const p = await geocode(clean(question.replace(/^where is\s+/i, "")));
+      if (!p) { addMessage("Sorry, I could not find that place.", "agent"); return; }
+      clearMap();
+      markers.push(L.marker([p.lat, p.lon]).addTo(map).bindPopup(p.name));
+      map.setView([p.lat, p.lon], 14);
+      addMessage(`${p.name}: latitude ${p.lat.toFixed(5)}, longitude ${p.lon.toFixed(5)}.`, "agent");
+    }
+  } catch (e) {
+    addMessage("Something went wrong talking to the map services. Please try again.", "agent");
+  }
+}
+
+document.getElementById("send").addEventListener("click", () => {
+  const input = document.getElementById("input");
+  if (!input.value.trim()) return;
+  ask(input.value.trim());
+  input.value = "";
+});
+document.getElementById("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("send").click();
+});
+</script>
+</body>
+</html>
