@@ -54,17 +54,48 @@ def route(origin_lat: float, origin_lon: float, dest_lat: float, dest_lon: float
 # auto-approves each tool call in the loop below, so the web user is never
 # blocked. To require approval in the UI, replace the loop with Approve /
 # Reject buttons that call agent.invoke(None, config) or reject the call.
+# The key is read from Streamlit Secrets first, then from an environment
+# variable (how AWS App Runner / ECS pass secrets to the container).
+import os
+
+def _get_api_key():
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY")
+
+def _message_text(message) -> str:
+    """Extract plain text from a message. Newer langchain versions return
+    content as a list of blocks (e.g. [{'type': 'text', 'text': '...'}]),
+    not a plain string, so printing it raw shows the whole structure."""
+    content = message.content
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+        elif hasattr(block, "text"):
+            parts.append(block.text)
+    return "\n".join(parts)
+
 @st.cache_resource
 def build_agent():
     model = ChatGoogleGenerativeAI(
         model="gemini-3.5-flash-lite",
-        google_api_key=st.secrets["GEMINI_API_KEY"],
+        google_api_key=_get_api_key(),
         temperature=0,
     )
     return create_agent(
         model, [geocode, route],
         checkpointer=MemorySaver(),
         interrupt_before=["tools"],
+        system_prompt=(
+            "You are a New York City driving assistant. "
+            "Always use the geocode tool to find the coordinates of the places "
+            "and the route tool to compute driving time and distance. "
+            "Never guess travel times from memory; report only numbers the tools returned."
+        ),
     )
 
 agent = build_agent()
@@ -90,6 +121,6 @@ if q := st.chat_input("e.g. How long does it take to drive from JFK Airport to T
         result = agent.invoke({"messages": [("user", q)]}, config)
         while agent.get_state(config).next:
             result = agent.invoke(None, config)  # auto-approve tool calls
-        answer = result["messages"][-1].content
+        answer = _message_text(result["messages"][-1])
         st.markdown(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer})
