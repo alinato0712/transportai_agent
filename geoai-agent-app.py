@@ -89,16 +89,9 @@ def _last_route_args(messages):
                 return call.get("args", {})
     return None
 
-def _route_map(origin_lat, origin_lon, dest_lat, dest_lon):
-    """Fetch route geometry from OSRM and draw it on a Folium map (Esri tiles)."""
-    url = f"https://router.project-osrm.org/route/v1/driving/{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
-    data = requests.get(url, params={"overview": "full", "geometries": "geojson"}, timeout=20).json()
-    leg = data["routes"][0]
-    coords = [(lat, lon) for lon, lat in leg["geometry"]["coordinates"]]
-    m = folium.Map(
-        location=[(origin_lat + dest_lat) / 2, (origin_lon + dest_lon) / 2],
-        zoom_start=11, tiles=None,
-    )
+def _base_map():
+    """Plain NYC map (Esri tiles), shown before any route is computed."""
+    m = folium.Map(location=[40.73, -73.94], zoom_start=11, tiles=None)
     # OSM default tiles 403 in some environments; CartoDB positron now needs
     # an API key. Esri World Street Map is free, no key.
     folium.TileLayer(
@@ -106,6 +99,16 @@ def _route_map(origin_lat, origin_lon, dest_lat, dest_lon):
         attr="Esri",
         name="Esri World Street Map",
     ).add_to(m)
+    return m
+
+def _route_map(origin_lat, origin_lon, dest_lat, dest_lon):
+    """Fetch route geometry from OSRM and draw it on the NYC map."""
+    url = f"https://router.project-osrm.org/route/v1/driving/{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
+    data = requests.get(url, params={"overview": "full", "geometries": "geojson"}, timeout=20).json()
+    leg = data["routes"][0]
+    coords = [(lat, lon) for lon, lat in leg["geometry"]["coordinates"]]
+    m = _base_map()
+    m.location = [(origin_lat + dest_lat) / 2, (origin_lon + dest_lon) / 2]
     folium.PolyLine(coords, color="blue", weight=4).add_to(m)
     folium.Marker((origin_lat, origin_lon), popup="Origin").add_to(m)
     folium.Marker((dest_lat, dest_lon), popup="Destination").add_to(m)
@@ -139,6 +142,13 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
+if "last_route" not in st.session_state:
+    st.session_state.last_route = None
+
+# Layout: the map IS the platform (on top), the chat sits below it.
+# The map slot is filled at the end of the script, so it already includes
+# the route from the question just asked.
+map_slot = st.empty()
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
@@ -157,14 +167,19 @@ if q := st.chat_input("e.g. How long does it take to drive from JFK Airport to T
         st.markdown(answer)
         route_args = _last_route_args(result["messages"])
         if route_args:
-            try:
-                st_folium(
-                    _route_map(
-                        route_args["origin_lat"], route_args["origin_lon"],
-                        route_args["dest_lat"], route_args["dest_lon"],
-                    ),
-                    width=700, height=450,
-                )
-            except Exception:
-                pass  # map is a bonus; the text answer already stands
+            st.session_state.last_route = route_args
     st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# Draw the map into the top slot: the latest route, or a plain NYC map.
+with map_slot:
+    try:
+        if st.session_state.last_route:
+            r = st.session_state.last_route
+            st_folium(
+                _route_map(r["origin_lat"], r["origin_lon"], r["dest_lat"], r["dest_lon"]),
+                width=1000, height=550,
+            )
+        else:
+            st_folium(_base_map(), width=1000, height=550)
+    except Exception:
+        pass  # map is a bonus; the text answer already stands
