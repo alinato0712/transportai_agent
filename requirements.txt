@@ -8,3 +8,5 @@ langgraph
 geopy
 requests
 pydantic
+folium
+streamlit-folium

@@ -12,6 +12,7 @@
 
 import uuid
 
+import folium
 import requests
 import streamlit as st
 from geopy.geocoders import Nominatim
@@ -20,6 +21,7 @@ from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
+from streamlit_folium import st_folium
 
 # --- Tools: same two as the skeleton ---
 class GeocodeInput(BaseModel):
@@ -79,6 +81,36 @@ def _message_text(message) -> str:
             parts.append(block.text)
     return "\n".join(parts)
 
+def _last_route_args(messages):
+    """Find the coordinates of the last route tool call in the agent trace."""
+    for m in reversed(messages):
+        for call in getattr(m, "tool_calls", []) or []:
+            if call.get("name") == "route":
+                return call.get("args", {})
+    return None
+
+def _route_map(origin_lat, origin_lon, dest_lat, dest_lon):
+    """Fetch route geometry from OSRM and draw it on a Folium map (Esri tiles)."""
+    url = f"https://router.project-osrm.org/route/v1/driving/{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
+    data = requests.get(url, params={"overview": "full", "geometries": "geojson"}, timeout=20).json()
+    leg = data["routes"][0]
+    coords = [(lat, lon) for lon, lat in leg["geometry"]["coordinates"]]
+    m = folium.Map(
+        location=[(origin_lat + dest_lat) / 2, (origin_lon + dest_lon) / 2],
+        zoom_start=11, tiles=None,
+    )
+    # OSM default tiles 403 in some environments; CartoDB positron now needs
+    # an API key. Esri World Street Map is free, no key.
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri",
+        name="Esri World Street Map",
+    ).add_to(m)
+    folium.PolyLine(coords, color="blue", weight=4).add_to(m)
+    folium.Marker((origin_lat, origin_lon), popup="Origin").add_to(m)
+    folium.Marker((dest_lat, dest_lon), popup="Destination").add_to(m)
+    return m
+
 @st.cache_resource
 def build_agent():
     model = ChatGoogleGenerativeAI(
@@ -123,4 +155,16 @@ if q := st.chat_input("e.g. How long does it take to drive from JFK Airport to T
             result = agent.invoke(None, config)  # auto-approve tool calls
         answer = _message_text(result["messages"][-1])
         st.markdown(answer)
+        route_args = _last_route_args(result["messages"])
+        if route_args:
+            try:
+                st_folium(
+                    _route_map(
+                        route_args["origin_lat"], route_args["origin_lon"],
+                        route_args["dest_lat"], route_args["dest_lon"],
+                    ),
+                    width=700, height=450,
+                )
+            except Exception:
+                pass  # map is a bonus; the text answer already stands
     st.session_state.messages.append({"role": "assistant", "content": answer})
