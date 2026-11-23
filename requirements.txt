@@ -1,0 +1,10 @@
+# Dependencies for geoai-agent-app.py (Streamlit Q&A platform)
+# Used by Streamlit Community Cloud / Hugging Face Spaces at deploy time.
+streamlit
+langchain
+langchain-core
+langchain-google-genai
+langgraph
+geopy
+requests
+pydantic
